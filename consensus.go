@@ -3,8 +3,11 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -14,29 +17,91 @@ const (
 	FAR_FUTURE_EPOCH = uint64(18446744073709551615)
 )
 
+// ForkVersion is a custom type that handles unmarshaling of fork versions
+// from both quoted hex strings ("0x10662431") and unquoted hex integers (0x10662431)
+type ForkVersion [4]byte
+
+// UnmarshalYAML implements custom YAML unmarshaling for ForkVersion
+func (fv *ForkVersion) UnmarshalYAML(value *yaml.Node) error {
+	var str string
+
+	// Try to unmarshal as string first
+	if err := value.Decode(&str); err == nil {
+		// Handle hex string format
+		if strings.HasPrefix(str, "0x") || strings.HasPrefix(str, "0X") {
+			str = str[2:]
+		}
+
+		bytes, err := hex.DecodeString(str)
+		if err != nil {
+			return fmt.Errorf("invalid hex string for fork version: %w", err)
+		}
+
+		if len(bytes) != 4 {
+			return fmt.Errorf("fork version must be 4 bytes, got %d", len(bytes))
+		}
+
+		copy(fv[:], bytes)
+		return nil
+	}
+
+	// Try to unmarshal as integer (for unquoted hex values in YAML)
+	var num int64
+	if err := value.Decode(&num); err == nil {
+		// Convert integer to 4 bytes (big-endian)
+		binary.BigEndian.PutUint32(fv[:], uint32(num))
+		return nil
+	}
+
+	// Try as uint64 in case it's a large number
+	var unum uint64
+	if err := value.Decode(&unum); err == nil {
+		binary.BigEndian.PutUint32(fv[:], uint32(unum))
+		return nil
+	}
+
+	// Try parsing the raw value as string representation of hex number
+	if value.Value != "" {
+		// Remove any 0x prefix from raw value
+		rawVal := value.Value
+		if strings.HasPrefix(rawVal, "0x") || strings.HasPrefix(rawVal, "0X") {
+			rawVal = rawVal[2:]
+		}
+
+		// Try parsing as hex string
+		num, err := strconv.ParseUint(rawVal, 16, 32)
+		if err == nil {
+			binary.BigEndian.PutUint32(fv[:], uint32(num))
+			return nil
+		}
+	}
+
+	return fmt.Errorf("cannot unmarshal fork version from type %s with value %q", value.Tag, value.Value)
+}
+
 // ChainConfig represents the minimal Ethereum consensus chain configuration
 // needed for bootnode operation
 type ChainConfig struct {
-	ConfigName           string  `yaml:"CONFIG_NAME"`
-	PresetBase           string  `yaml:"PRESET_BASE"`
-	GenesisForkVersion   [4]byte `yaml:"GENESIS_FORK_VERSION"`
-	AltairForkVersion    [4]byte `yaml:"ALTAIR_FORK_VERSION"`
-	AltairForkEpoch      uint64  `yaml:"ALTAIR_FORK_EPOCH"`
-	BellatrixForkVersion [4]byte `yaml:"BELLATRIX_FORK_VERSION"`
-	BellatrixForkEpoch   uint64  `yaml:"BELLATRIX_FORK_EPOCH"`
-	CapellaForkVersion   [4]byte `yaml:"CAPELLA_FORK_VERSION"`
-	CapellaForkEpoch     uint64  `yaml:"CAPELLA_FORK_EPOCH"`
-	DenebForkVersion     [4]byte `yaml:"DENEB_FORK_VERSION"`
-	DenebForkEpoch       uint64  `yaml:"DENEB_FORK_EPOCH"`
-	ElectraForkVersion   [4]byte `yaml:"ELECTRA_FORK_VERSION"`
-	ElectraForkEpoch     uint64  `yaml:"ELECTRA_FORK_EPOCH"`
-	GloasForkVersion     [4]byte `yaml:"GLOAS_FORK_VERSION"`
-	GloasForkEpoch       uint64  `yaml:"GLOAS_FORK_EPOCH"`
-	FuluForkVersion      [4]byte `yaml:"FULU_FORK_VERSION"`
-	FuluForkEpoch        uint64  `yaml:"FULU_FORK_EPOCH"`
-	SecondsPerSlot       uint64  `yaml:"SECONDS_PER_SLOT"`
-	SlotsPerEpoch        uint64  `yaml:"SLOTS_PER_EPOCH"`
-	MinGenesisTime       uint64  `yaml:"MIN_GENESIS_TIME"`
+	ConfigName           string      `yaml:"CONFIG_NAME"`
+	PresetBase           string      `yaml:"PRESET_BASE"`
+	GenesisForkVersion   ForkVersion `yaml:"GENESIS_FORK_VERSION"`
+	AltairForkVersion    ForkVersion `yaml:"ALTAIR_FORK_VERSION"`
+	AltairForkEpoch      uint64      `yaml:"ALTAIR_FORK_EPOCH"`
+	BellatrixForkVersion ForkVersion `yaml:"BELLATRIX_FORK_VERSION"`
+	BellatrixForkEpoch   uint64      `yaml:"BELLATRIX_FORK_EPOCH"`
+	CapellaForkVersion   ForkVersion `yaml:"CAPELLA_FORK_VERSION"`
+	CapellaForkEpoch     uint64      `yaml:"CAPELLA_FORK_EPOCH"`
+	DenebForkVersion     ForkVersion `yaml:"DENEB_FORK_VERSION"`
+	DenebForkEpoch       uint64      `yaml:"DENEB_FORK_EPOCH"`
+	ElectraForkVersion   ForkVersion `yaml:"ELECTRA_FORK_VERSION"`
+	ElectraForkEpoch     uint64      `yaml:"ELECTRA_FORK_EPOCH"`
+	GloasForkVersion     ForkVersion `yaml:"GLOAS_FORK_VERSION"`
+	GloasForkEpoch       uint64      `yaml:"GLOAS_FORK_EPOCH"`
+	FuluForkVersion      ForkVersion `yaml:"FULU_FORK_VERSION"`
+	FuluForkEpoch        uint64      `yaml:"FULU_FORK_EPOCH"`
+	SecondsPerSlot       uint64      `yaml:"SECONDS_PER_SLOT"`
+	SlotsPerEpoch        uint64      `yaml:"SLOTS_PER_EPOCH"`
+	MinGenesisTime       uint64      `yaml:"MIN_GENESIS_TIME"`
 }
 
 // ENRForkID represents the fork ID structure stored in the eth2 ENR field
@@ -118,7 +183,7 @@ func GetCurrentForkVersion(config *ChainConfig, genesisTime uint64) [4]byte {
 
 	// If we haven't reached genesis time yet, use genesis fork
 	if now < genesisTime {
-		return config.GenesisForkVersion
+		return [4]byte(config.GenesisForkVersion)
 	}
 
 	// Calculate current slot and epoch
@@ -129,41 +194,41 @@ func GetCurrentForkVersion(config *ChainConfig, genesisTime uint64) [4]byte {
 	// Return fork version based on current epoch
 	// Check from newest to oldest
 	if config.FuluForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.FuluForkEpoch {
-		return config.FuluForkVersion
+		return [4]byte(config.FuluForkVersion)
 	}
 	if config.GloasForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.GloasForkEpoch {
-		return config.GloasForkVersion
+		return [4]byte(config.GloasForkVersion)
 	}
 	if config.ElectraForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.ElectraForkEpoch {
-		return config.ElectraForkVersion
+		return [4]byte(config.ElectraForkVersion)
 	}
 	if config.DenebForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.DenebForkEpoch {
-		return config.DenebForkVersion
+		return [4]byte(config.DenebForkVersion)
 	}
 	if config.CapellaForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.CapellaForkEpoch {
-		return config.CapellaForkVersion
+		return [4]byte(config.CapellaForkVersion)
 	}
 	if config.BellatrixForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.BellatrixForkEpoch {
-		return config.BellatrixForkVersion
+		return [4]byte(config.BellatrixForkVersion)
 	}
 	if config.AltairForkEpoch != FAR_FUTURE_EPOCH && currentEpoch >= config.AltairForkEpoch {
-		return config.AltairForkVersion
+		return [4]byte(config.AltairForkVersion)
 	}
 
-	return config.GenesisForkVersion
+	return [4]byte(config.GenesisForkVersion)
 }
 
 // GetNextFork returns the next scheduled fork version and epoch
 func GetNextFork(config *ChainConfig, currentEpoch uint64) ([4]byte, uint64) {
 	// Check all forks from oldest to newest to find the next one
 	forks := []ForkScheduleEntry{
-		{config.AltairForkEpoch, config.AltairForkVersion},
-		{config.BellatrixForkEpoch, config.BellatrixForkVersion},
-		{config.CapellaForkEpoch, config.CapellaForkVersion},
-		{config.DenebForkEpoch, config.DenebForkVersion},
-		{config.ElectraForkEpoch, config.ElectraForkVersion},
-		{config.GloasForkEpoch, config.GloasForkVersion},
-		{config.FuluForkEpoch, config.FuluForkVersion},
+		{config.AltairForkEpoch, [4]byte(config.AltairForkVersion)},
+		{config.BellatrixForkEpoch, [4]byte(config.BellatrixForkVersion)},
+		{config.CapellaForkEpoch, [4]byte(config.CapellaForkVersion)},
+		{config.DenebForkEpoch, [4]byte(config.DenebForkVersion)},
+		{config.ElectraForkEpoch, [4]byte(config.ElectraForkVersion)},
+		{config.GloasForkEpoch, [4]byte(config.GloasForkVersion)},
+		{config.FuluForkEpoch, [4]byte(config.FuluForkVersion)},
 	}
 
 	for _, fork := range forks {
