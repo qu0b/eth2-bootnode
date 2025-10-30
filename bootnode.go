@@ -13,9 +13,9 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/libp2p/go-libp2p-core/crypto"
 	"github.com/protolambda/ask"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -26,18 +26,14 @@ import (
 )
 
 type P2pPrivKeyFlag struct {
-	Priv *crypto.Secp256k1PrivateKey
+	Priv *ecdsa.PrivateKey
 }
 
 func (f P2pPrivKeyFlag) String() string {
 	if f.Priv == nil {
 		return "? (no private key data)"
 	}
-	secpKey := f.Priv
-	keyBytes, err := secpKey.Raw()
-	if err != nil {
-		return "? (invalid private key)"
-	}
+	keyBytes := gcrypto.FromECDSA(f.Priv)
 	return hex.EncodeToString(keyBytes)
 }
 
@@ -47,7 +43,7 @@ func (f *P2pPrivKeyFlag) Set(value string) error {
 		f.Priv = nil
 		return nil
 	}
-	var priv *crypto.Secp256k1PrivateKey
+	var priv *ecdsa.PrivateKey
 	var err error
 	priv, err = ParsePrivateKey(value)
 	if err != nil {
@@ -61,7 +57,7 @@ func (f *P2pPrivKeyFlag) Type() string {
 	return "P2P Private key"
 }
 
-func ParsePrivateKey(v string) (*crypto.Secp256k1PrivateKey, error) {
+func ParsePrivateKey(v string) (*ecdsa.PrivateKey, error) {
 	if strings.HasPrefix(v, "0x") {
 		v = v[2:]
 	}
@@ -69,17 +65,12 @@ func ParsePrivateKey(v string) (*crypto.Secp256k1PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse private key, expected hex string: %v", err)
 	}
-	var priv crypto.PrivKey
-	priv, err = crypto.UnmarshalSecp256k1PrivateKey(privKeyBytes)
+	// Use geth's crypto functions to create an ECDSA private key
+	ecdsaKey, err := gcrypto.ToECDSA(privKeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse private key, invalid private key (Secp256k1): %v", err)
 	}
-	key := (priv).(*crypto.Secp256k1PrivateKey)
-	key.Curve = gcrypto.S256()              // Temporary hack, so libp2p Secp256k1 is recognized as geth Secp256k1 in disc v5.1
-	if !key.Curve.IsOnCurve(key.X, key.Y) { // TODO: should we be checking this?
-		return nil, fmt.Errorf("invalid private key, not on curve")
-	}
-	return key, nil
+	return ecdsaKey, nil
 }
 
 func ParseEnode(v string) (*enode.Node, error) {
@@ -179,7 +170,7 @@ func (c *BootnodeCmd) Run(ctx context.Context, args ...string) error {
 		return fmt.Errorf("need p2p priv key")
 	}
 
-	ecdsaPrivKey := (*ecdsa.PrivateKey)(c.Priv.Priv)
+	ecdsaPrivKey := c.Priv.Priv
 
 	if c.ListenUDP == 0 {
 		c.ListenUDP = c.ENRUDP
@@ -208,13 +199,12 @@ func (c *BootnodeCmd) Run(ctx context.Context, args ...string) error {
 	if err != nil {
 		return err
 	}
-	lvl, err := log.LvlFromString(c.Level)
-	if err != nil {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(c.Level)); err != nil {
 		return err
 	}
-	gethLogger := log.New()
-	outHandler := log.StreamHandler(os.Stdout, log.TerminalFormat(c.Color))
-	gethLogger.SetHandler(log.LvlFilterHandler(lvl, outHandler))
+	handler := log.NewTerminalHandlerWithLevel(os.Stdout, lvl, c.Color)
+	gethLogger := log.NewLogger(handler)
 
 	// Optional HTTP server, to read the ENR from
 	var srv *http.Server
